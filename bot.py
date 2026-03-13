@@ -1,12 +1,12 @@
 import os
 import logging
+import httpx
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, MessageHandler,
     CommandHandler, filters, ContextTypes
 )
-from openai import OpenAI
 
 # ── Logging ───────────────────────────────────────────────
 logging.basicConfig(
@@ -15,17 +15,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── OpenRouter Client ─────────────────────────────────────
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.environ["OPENROUTER_API_KEY"],
-    default_headers={
-        "HTTP-Referer": "https://github.com/your-repo",
-        "X-Title": "Nemotron Telegram Bot"
-    }
-)
-
 MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 
 SYSTEM_PROMPT = """You are a helpful, smart, and concise AI assistant.
 Format your responses cleanly:
@@ -51,6 +42,27 @@ def trim_history(user_id: int):
     history = conversation_history[user_id]
     if len(history) > MAX_HISTORY + 1:
         conversation_history[user_id] = [history[0]] + history[-(MAX_HISTORY):]
+
+
+async def call_openrouter(messages: list) -> str:
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/your-repo",
+                "X-Title": "Nemotron Telegram Bot"
+            },
+            json={
+                "model": MODEL,
+                "messages": messages,
+                "max_tokens": 1024,
+                "temperature": 0.7
+            }
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
 
 
 # ── Build Telegram app ────────────────────────────────────
@@ -89,17 +101,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "user", "content": user_message})
 
     try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=history,
-            max_tokens=1024,
-            temperature=0.7
-        )
-
-        reply = response.choices[0].message.content.strip()
+        reply = await call_openrouter(history)
         history.append({"role": "assistant", "content": reply})
         trim_history(user_id)
-
         await update.message.reply_text(reply)
 
     except Exception as e:
