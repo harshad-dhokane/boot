@@ -1,5 +1,7 @@
 import os
 import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, MessageHandler,
@@ -24,7 +26,7 @@ client = OpenAI(
     }
 )
 
-MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1:free"
+MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
 SYSTEM_PROMPT = """You are a helpful, smart, and concise AI assistant.
 Format your responses cleanly:
@@ -35,7 +37,7 @@ Format your responses cleanly:
 
 # ── Per-user conversation memory ─────────────────────────
 conversation_history: dict[int, list] = {}
-MAX_HISTORY = 10  # messages per user
+MAX_HISTORY = 10
 
 
 def get_history(user_id: int) -> list:
@@ -48,18 +50,12 @@ def get_history(user_id: int) -> list:
 
 def trim_history(user_id: int):
     history = conversation_history[user_id]
-    # Keep system prompt + last MAX_HISTORY messages
     if len(history) > MAX_HISTORY + 1:
         conversation_history[user_id] = [history[0]] + history[-(MAX_HISTORY):]
 
 
-# ── Format reply for Telegram ─────────────────────────────
-def format_message(text: str) -> str:
-    # Escape Telegram MarkdownV2 special chars
-    special_chars = ['_', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
+# ── Telegram App ──────────────────────────────────────────
+bot_app = ApplicationBuilder().token(os.environ["TELEGRAM_TOKEN"]).build()
 
 
 # ── Handlers ──────────────────────────────────────────────
@@ -84,13 +80,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"User {user_id}: {user_message[:60]}")
 
-    # Show typing indicator
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id,
         action="typing"
     )
 
-    # Build history
     history = get_history(user_id)
     history.append({"role": "user", "content": user_message})
 
@@ -103,9 +97,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         reply = response.choices[0].message.content.strip()
-
-        # Save assistant reply to history
         history.append({"role": "assistant", "content": reply})
+        trim_history(user_id)
+
+        await update.message.reply_text(reply)
+
+    except Exception as e:
+        logger.error(f"API error: {e}")
+        await update.message.reply_text(
+            "⚠️ Something went wrong. Please try again in a moment."
+        )
+
+
+bot_app.add_handler(CommandHandler("start", start))
+bot_app.add_handler(CommandHandler("clear", clear))
+bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+
+# ── FastAPI + Lifespan ────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await bot_app.initialize()
+    webhook_url = os.environ["WEBHOOK_URL"]
+    await bot_app.bot.set_webhook(
+        url=f"{webhook_url}/webhook",
+        drop_pending_updates=True
+    )
+    logger.info(f"Webhook set to {webhook_url}/webhook")
+    yield
+    # Shutdown
+    await bot_app.shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/")
+async def root():
+    return {"status": "Nemotron Bot is running"}
+
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, bot_app.bot)
+    await bot_app.process_update(update)
+    return {"ok": True}        history.append({"role": "assistant", "content": reply})
         trim_history(user_id)
 
         # Send reply — plain text is safest for varied responses
