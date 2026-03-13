@@ -1,6 +1,5 @@
 import os
 import logging
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import (
@@ -9,7 +8,7 @@ from telegram.ext import (
 )
 from openai import OpenAI
 
-# ── Logging ──────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
@@ -36,7 +35,7 @@ Format your responses cleanly:
 - Be direct and helpful"""
 
 # ── Per-user conversation memory ─────────────────────────
-conversation_history: dict[int, list] = {}
+conversation_history: dict = {}
 MAX_HISTORY = 10
 
 
@@ -54,16 +53,17 @@ def trim_history(user_id: int):
         conversation_history[user_id] = [history[0]] + history[-(MAX_HISTORY):]
 
 
-# ── Telegram App ──────────────────────────────────────────
-bot_app = ApplicationBuilder().token(os.environ["TELEGRAM_TOKEN"]).build()
+# ── Build Telegram app ────────────────────────────────────
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 
 # ── Handlers ──────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.first_name
     await update.message.reply_text(
-        f"👋 Hey {user}! I'm powered by Nemotron Ultra.\n\n"
-        f"Just send me a message to get started.\n"
+        f"Hey {user}! I'm powered by Nemotron Super.\n\n"
+        f"Send me any message to get started.\n"
         f"Use /clear to reset our conversation."
     )
 
@@ -71,7 +71,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conversation_history.pop(user_id, None)
-    await update.message.reply_text("🗑 Conversation cleared! Starting fresh.")
+    await update.message.reply_text("Conversation cleared! Starting fresh.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,7 +105,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"API error: {e}")
         await update.message.reply_text(
-            "⚠️ Something went wrong. Please try again in a moment."
+            "Something went wrong. Please try again in a moment."
         )
 
 
@@ -114,23 +114,8 @@ bot_app.add_handler(CommandHandler("clear", clear))
 bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 
-# ── FastAPI + Lifespan ────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    await bot_app.initialize()
-    webhook_url = os.environ["WEBHOOK_URL"]
-    await bot_app.bot.set_webhook(
-        url=f"{webhook_url}/webhook",
-        drop_pending_updates=True
-    )
-    logger.info(f"Webhook set to {webhook_url}/webhook")
-    yield
-    # Shutdown
-    await bot_app.shutdown()
-
-
-app = FastAPI(lifespan=lifespan)
+# ── FastAPI ───────────────────────────────────────────────
+app = FastAPI()
 
 
 @app.get("/")
@@ -138,42 +123,21 @@ async def root():
     return {"status": "Nemotron Bot is running"}
 
 
+@app.get("/setup")
+async def setup():
+    webhook_url = os.environ["WEBHOOK_URL"]
+    await bot_app.initialize()
+    await bot_app.bot.set_webhook(
+        url=f"{webhook_url}/webhook",
+        drop_pending_updates=True
+    )
+    return {"status": "Webhook set", "url": f"{webhook_url}/webhook"}
+
+
 @app.post("/webhook")
 async def webhook(request: Request):
+    await bot_app.initialize()
     data = await request.json()
     update = Update.de_json(data, bot_app.bot)
     await bot_app.process_update(update)
-    return {"ok": True}        history.append({"role": "assistant", "content": reply})
-        trim_history(user_id)
-
-        # Send reply — plain text is safest for varied responses
-        await update.message.reply_text(reply)
-
-    except Exception as e:
-        logger.error(f"API error: {e}")
-        await update.message.reply_text(
-            "⚠️ Something went wrong. Please try again in a moment."
-        )
-
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Exception: {context.error}")
-
-
-# ── Main ──────────────────────────────────────────────────
-def main():
-    token = os.environ["TELEGRAM_TOKEN"]
-
-    app = ApplicationBuilder().token(token).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("clear", clear))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
-
-    logger.info("Bot is running...")
-    app.run_polling(drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    main()
+    return {"ok": True}
