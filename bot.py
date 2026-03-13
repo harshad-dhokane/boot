@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 
 SYSTEM_PROMPT = """You are a helpful, smart, and concise AI assistant.
 Format your responses cleanly:
@@ -24,6 +25,9 @@ Format your responses cleanly:
 - Use numbered lists (1. 2. 3.) when listing items
 - Keep responses clear and well structured
 - Be direct and helpful"""
+
+# ── Reusable HTTP client (no reconnect overhead) ──────────
+_http_client = httpx.AsyncClient(timeout=60)
 
 # ── Per-user conversation memory ─────────────────────────
 conversation_history: dict = {}
@@ -44,30 +48,37 @@ def trim_history(user_id: int):
         conversation_history[user_id] = [history[0]] + history[-(MAX_HISTORY):]
 
 
+# ── OpenRouter call ───────────────────────────────────────
 async def call_openrouter(messages: list) -> str:
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/your-repo",
-                "X-Title": "Nemotron Telegram Bot"
-            },
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "max_tokens": 1024,
-                "temperature": 0.7
-            }
-        )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()
+    response = await _http_client.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/your-repo",
+            "X-Title": "Nemotron Telegram Bot"
+        },
+        json={
+            "model": MODEL,
+            "messages": messages,
+            "max_tokens": 1024,
+            "temperature": 0.7
+        }
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
 
 
-# ── Build Telegram app ────────────────────────────────────
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+# ── Telegram app + init guard ─────────────────────────────
 bot_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+_initialized = False
+
+
+async def ensure_initialized():
+    global _initialized
+    if not _initialized:
+        await bot_app.initialize()
+        _initialized = True
 
 
 # ── Handlers ──────────────────────────────────────────────
@@ -129,8 +140,8 @@ async def root():
 
 @app.get("/setup")
 async def setup():
+    await ensure_initialized()
     webhook_url = os.environ["WEBHOOK_URL"]
-    await bot_app.initialize()
     await bot_app.bot.set_webhook(
         url=f"{webhook_url}/webhook",
         drop_pending_updates=True
@@ -140,7 +151,7 @@ async def setup():
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    await bot_app.initialize()
+    await ensure_initialized()
     data = await request.json()
     update = Update.de_json(data, bot_app.bot)
     await bot_app.process_update(update)
